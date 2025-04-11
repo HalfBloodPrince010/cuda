@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 
 // error checking macro
@@ -14,7 +15,7 @@
     } while (0)
 
 
-const size_t N = 8ULL*1024ULL*1024ULL;  // data size
+const size_t N = 2*8ULL*1024ULL*1024ULL;  // data size
 //const size_t N = 256*640; // data size
 const int BLOCK_SIZE = 256;  // CUDA maximum is 1024
 // naive atomic reduction kernel
@@ -31,7 +32,7 @@ __global__ void reduce(float *gdata, float *out){
 
      while (idx < N) {  // grid stride loop to load data
         sdata[tid] += gdata[idx];
-        idx += gridDim.x*blockDim.x;  
+        idx += gridDim.x*blockDim.x;
         }
 
      for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
@@ -50,7 +51,7 @@ __global__ void reduce(float *gdata, float *out){
 
      while (idx < N) {  // grid stride loop to load data
         sdata[tid] += gdata[idx];
-        idx += gridDim.x*blockDim.x;  
+        idx += gridDim.x*blockDim.x;
         }
 
      for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
@@ -62,39 +63,50 @@ __global__ void reduce(float *gdata, float *out){
   }
 
 
-__global__ void reduce_ws(float *gdata, float *out){
-     __shared__ float sdata[32];
-     int tid = threadIdx.x;
-     int idx = threadIdx.x+blockDim.x*blockIdx.x;
-     float val = 0.0f;
-     unsigned mask = 0xFFFFFFFFU;
-     int lane = threadIdx.x % warpSize;
-     int warpID = threadIdx.x / warpSize;
-     while (idx < N) {  // grid stride loop to load 
-        val += gdata[idx];
-        idx += gridDim.x*blockDim.x;  
+__global__ void reduce_warp_shuffle(float *gdata, float *out) {
+        // Each Warp Produces a value. Utmost 1024/32 warps = 32 warps
+        __shared__ float sdata[32];
+        int tid = threadIdx.x;
+        int idx = threadIdx.x + blockDim.x * blockIdx.x;
+
+        // each thread has a val
+        float val = 0.0f;
+        unsigned mask = 0xFFFFFFFFU;
+        int lane = threadIdx.x % warpSize;
+        int warpID = threadIdx.x / warpSize;
+
+        //grid stride loop to handle variable length data
+        while(idx < N) {
+            val += gdata[idx];
+            idx += gridDim.x * blockDim.x;  // Total threads in the grid
         }
 
- // 1st warp-shuffle reduction
-    for (int offset = warpSize/2; offset > 0; offset >>= 1) 
-       val += __shfl_down_sync(mask, val, offset);
-    if (lane == 0) sdata[warpID] = val;
-   __syncthreads(); // put warp results in shared mem
+        // 1st warp-shuffle operation, where each warp produces a value (tid/lane = 0)
+        // holds that value
+        for(int offset = warpSize/2; offset > 0; offset >>= 1) {
+            val += __shfl_down_sync(mask, val, offset);
+        }
+        if(lane == 0) sdata[warpID] = val;
+        __syncthreads();
 
-// hereafter, just warp 0
-    if (warpID == 0){
- // reload val from shared mem if warp existed
-       val = (tid < blockDim.x/warpSize)?sdata[lane]:0;
+        // Now we have to add 32 elements, hence we just need 1 warp
+        if(warpID == 0) {
+            // this condition ensures we only consider the warp that participated.
+            // For instance if there were only 512 threads, then 512/32 = 16
+            // Only 16 warps produced the value. Hence we don't consider other 16 warps for addition.
+            val = (tid < blockDim.x/warpSize)?sdata[lane]:0;
 
- // final warp-shuffle reduction
-       for (int offset = warpSize/2; offset > 0; offset >>= 1) 
-          val += __shfl_down_sync(mask, val, offset);
+            // Final Warp Shuffle
+            for(int offset = warpSize/2; offset > 0; offset >>= 1){
+                val += __shfl_down_sync(mask, val, offset);
+            }
 
-       if  (tid == 0) atomicAdd(out, val);
-     }
-  }
-
-
+            // Produced 1 value for block
+            // All block after final warp shuffle atomically adds to the out.
+            // This prevents another reduction.
+            if(tid == 0) atomicAdd(out, val);
+        }
+    }
 
 
 int main(){
@@ -138,7 +150,7 @@ int main(){
   cudaMemset(d_sum, 0, sizeof(float));
   cudaCheckErrors("cudaMemset failure");
   //cuda processing sequence step 1 is complete
-  reduce_ws<<<blocks, BLOCK_SIZE>>>(d_A, d_sum);
+  reduce_warp_shuffle<<<blocks, BLOCK_SIZE>>>(d_A, d_sum);
   cudaCheckErrors("reduction warp shuffle kernel launch failure");
   //cuda processing sequence step 2 is complete
   // copy vector sums from device to host:
@@ -149,4 +161,3 @@ int main(){
   printf("reduction warp shuffle sum correct!\n");
   return 0;
 }
-  
