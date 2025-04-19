@@ -4,6 +4,8 @@
 #include <sys/time.h>
 #include <stdio.h>
 
+#define USE_STREAMS
+
 // modifiable
 typedef float ft;
 const int chunks = 64;
@@ -97,8 +99,8 @@ int main() {
   unsigned long long et = dtime_usec(0);
 
   for (int i = 0; i < chunks; i++) { //depth-first launch
-    cudaMemcpyAsync(d_x + FIXME, h_x + FIXME, (FIXME) * sizeof(ft), cudaMemcpyHostToDevice, streams[FIXME]);
-    gaussian_pdf<<<((FIXME) + 255) / 256, 256, 0, streams[FIXME]>>>(d_x + FIXME, d_y + FIXME, 0.0, 1.0, FIXME);
+    cudaMemcpyAsync(d_x + i * (ds / chunks), h_x + i * (ds / chunks), (ds / chunks) * sizeof(ft), cudaMemcpyHostToDevice, streams[i % num_streams]);
+    gaussian_pdf<<<((ds / chunks) + 255) / 256, 256, 0, streams[i % num_streams]>>>(d_x + i * (ds / chunks), d_y + i * (ds / chunks), 0.0, 1.0, (ds / chunks));
     cudaMemcpyAsync(h_y + i * (ds / chunks), d_y + i * (ds / chunks), (ds / chunks) * sizeof(ft), cudaMemcpyDeviceToHost, streams[i % num_streams]);
   }
   cudaDeviceSynchronize();
